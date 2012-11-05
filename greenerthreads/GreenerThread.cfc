@@ -3,9 +3,7 @@
  *
  *	TODO: linked loop of threads for active and map of waiting threads instead of myThreads[]
  *	TODO: calls between components
- * 	TODO: collapse incPc();popPc() to popPc();
  * 	TODO: tail recursion stack cleanup
- *	TODO: _gt_step(nanos) loop using Java System.getNanos(), vary time allocated to each thread
  *	TODO: else/else if
  *	TODO: try/catch/finally
  *	TODO: message receipt with switch(µ...)
@@ -131,7 +129,7 @@ component {
 						
 						nextThread = myThreads[threadIndex];
 						
-						if (arrayLen(nextThread.stack) eq 0) {	
+						if (arrayIsEmpty(nextThread.stack) or not nextThread.stack[1].instance._gt_step(2)) {	// Let the thread execute steps for 2 ms
 							
 							// Run out of stuff to do, kill thread
 							arrayDeleteAt(myThreads, threadIndex);
@@ -144,10 +142,7 @@ component {
 									structDelete(_threadsByName, nextThread.name);
 								}
 							}	// lock
-							
-						} else {
-							nextThread.stack[1].instance._gt_step(); // Let the thread execute the next step
-						}
+						} // stack empty
 					} // for each thread
 					
 				} else {
@@ -313,8 +308,6 @@ component {
 			returnCallIndex = callIndex,
 			pc = [initialPc]
 		});
-		
-		_thread.saveLocalVarsToFrame = 2; 	// saveLocalVariables() will save to second frame on stack
 	}
 	
 
@@ -332,7 +325,6 @@ component {
 		}
 		
 		arrayDeleteAt(_thread.stack, 1);
-		_thread.saveLocalVarsToFrame = 0;	// don't save local variables
 	}
 	
 	
@@ -442,9 +434,8 @@ component {
 	 */
 	 
 	package void function saveLocalVariables(struct localScope) {
-		if (arrayLen(_thread.stack) gt 0 and _thread.saveLocalVarsToFrame gt 0) {
-			structDelete(localScope, "this");
-			_thread.stack[_thread.saveLocalVarsToFrame].localVars = localScope;
+		if (arrayLen(_thread.stack) gt 0) {
+			_thread.stack[1].localVars = structCopy(localScope);
 		}
 	}
 	
@@ -452,13 +443,11 @@ component {
 	
 	/**
 	 * Called by _gt_step() to restore local variables before executing a statement
-	 *
-	 * @returns struct containing local variables to append to local
 	 */
 	 
-	package struct function getFrameLocalVariables() {
-		_thread.saveLocalVarsToFrame = 1;
-		return _thread.stack[_thread.saveLocalVarsToFrame].localVars;
+	package void function loadLocalVariables(struct localScope, bClear = true) {
+		if (bClear) structClear(localScope);
+		structAppend(localScope, _thread.stack[1].localVars);
 	}
 	
 	
@@ -784,7 +773,12 @@ component {
 							
 							if (structKeyExists(info.declarations, nextCallToMake.name)) {
 								
-								arrayAppend(statements, 	'			case #statementCounter++#: _gt.incPc(); _gt.pushStackFrame(#nextCallToMakeIndex#, _gt.getSymbolLocation("#nextCallToMake.name#"), _gt_args_#nextCallToMake.name#(#nextCallToMake.args#)); break;');
+								arrayAppend(statements, 	'				case #statementCounter++#:');
+								arrayAppend(statements, 	'					_gt.incPc();');
+								arrayAppend(statements, 	'					_gt.saveLocalVariables(local);');
+								arrayAppend(statements, 	'					_gt.pushStackFrame(#nextCallToMakeIndex#, _gt.getSymbolLocation("#nextCallToMake.name#"), _gt_args_#nextCallToMake.name#(#nextCallToMake.args#));');
+								arrayAppend(statements, 	'					_gt.loadLocalVariables(local);');
+								arrayAppend(statements, 	'					break;');
 								
 							} else {
 								
@@ -792,70 +786,74 @@ component {
 								
 								switch(nextCallToMake.name) {
 									case "switch":
-										arrayAppend(statements, '			case #statementCounter++#:');
-										arrayAppend(statements, '				_gt.incPc();');
-										arrayAppend(statements, '				_gt_case_symbol_location = _gt.getSymbolLocation("block_#nextCallToMake.block#_case_##reReplace(#nextCallToMake.args#, "[^\w\d]", "", "ALL")##");');
-										arrayAppend(statements, '				_gt_default_symbol_location = _gt.getSymbolLocation("block_#nextCallToMake.block#_case_default");');
-										arrayAppend(statements, '				if(_gt_case_symbol_location gt 0) {');
-										arrayAppend(statements, '					 _gt.pushPc(_gt_case_symbol_location);');
-										arrayAppend(statements, '				} else if (_gt_default_symbol_location gt 0) {');
-										arrayAppend(statements, '					_gt.pushPc(_gt_default_symbol_location);');
-										arrayAppend(statements, '				}');
-										arrayAppend(statements, '				break;');
+										arrayAppend(statements, '				case #statementCounter++#:');
+										arrayAppend(statements, '					_gt.incPc();');
+										arrayAppend(statements, '					_gt_case_symbol_location = _gt.getSymbolLocation("block_#nextCallToMake.block#_case_##reReplace(#nextCallToMake.args#, "[^\w\d]", "", "ALL")##");');
+										arrayAppend(statements, '					_gt_default_symbol_location = _gt.getSymbolLocation("block_#nextCallToMake.block#_case_default");');
+										arrayAppend(statements, '					if(_gt_case_symbol_location gt 0) {');
+										arrayAppend(statements, '						 _gt.pushPc(_gt_case_symbol_location);');
+										arrayAppend(statements, '					} else if (_gt_default_symbol_location gt 0) {');
+										arrayAppend(statements, '						_gt.pushPc(_gt_default_symbol_location);');
+										arrayAppend(statements, '					}');
+										arrayAppend(statements, '					break;');
 										break;
 									case "if":
-										arrayAppend(statements, '			case #statementCounter++#: _gt.incPc(); if (#renderCall(nextCallToMake.args)#) {_gt.pushPc(_gt.getSymbolLocation("block_#nextCallToMake.block#"));} break;');
+										arrayAppend(statements, '				case #statementCounter++#: _gt.incPc(); if (#renderCall(nextCallToMake.args)#) {_gt.pushPc(_gt.getSymbolLocation("block_#nextCallToMake.block#"));} break;');
 										break;
 									case "while":
-										arrayAppend(statements, '			case #statementCounter++#: if (#renderCall(nextCallToMake.args)#) _gt.pushPc(_gt.getSymbolLocation("block_#nextCallToMake.block#")); else _gt.incPc(); break;');
+										arrayAppend(statements, '				case #statementCounter++#: if (#renderCall(nextCallToMake.args)#) _gt.pushPc(_gt.getSymbolLocation("block_#nextCallToMake.block#")); else _gt.incPc(); break;');
 										break;
 									case "send":
-										arrayAppend(statements, '			case #statementCounter++#: _gt.setReturnValue(#nextCallToMakeIndex#, _gt.send(#renderCall(nextCallToMake.args)#)); _gt.incPc(); break;');
+										arrayAppend(statements, '				case #statementCounter++#: _gt.setReturnValue(#nextCallToMakeIndex#, _gt.send(#renderCall(nextCallToMake.args)#)); _gt.incPc(); break;');
 										break;
 									case "receive":										
-										arrayAppend(statements, '			case #statementCounter++#: _gt.receive(#nextCallToMakeIndex#); break;');
+										arrayAppend(statements, '				case #statementCounter++#: _gt.receive(#nextCallToMakeIndex#); break;');
 										break;
 									case "_gt_struct_literal":
-										arrayAppend(statements, '			case #statementCounter++#: _gt.setReturnValue(#nextCallToMakeIndex#, _gt.structLiteral(#renderCall(nextCallToMake.args)#)); _gt.incPc(); break;');
+										arrayAppend(statements, '				case #statementCounter++#: _gt.setReturnValue(#nextCallToMakeIndex#, _gt.structLiteral(#renderCall(nextCallToMake.args)#)); _gt.incPc(); break;');
 										break;
 									case "getTid":
-										arrayAppend(statements, '			case #statementCounter++#: _gt.setReturnValue(#nextCallToMakeIndex#, _gt.getTid()); _gt.incPc(); break;');
+										arrayAppend(statements, '				case #statementCounter++#: _gt.setReturnValue(#nextCallToMakeIndex#, _gt.getTid()); _gt.incPc(); break;');
 										break;
 									case "writeLog":
 									case "writeDump":
 										// These look like functions but are actually tags that don't like being treated like functions (we get weird CF error)
 										// TODO: Other function-like tags
-										arrayAppend(statements, '			case #statementCounter++#: #nextCallToMake.name#(#renderCall(nextCallToMake.args)#); _gt.incPc(); break;');
+										arrayAppend(statements, '				case #statementCounter++#: #nextCallToMake.name#(#renderCall(nextCallToMake.args)#); _gt.incPc(); break;');
 										break;
 									default: 
-										arrayAppend(statements, '			case #statementCounter++#: _gt.setReturnValue(#nextCallToMakeIndex#, #nextCallToMake.name#(#renderCall(nextCallToMake.args)#)); _gt.incPc(); break;');
+										arrayAppend(statements, '				case #statementCounter++#: _gt.setReturnValue(#nextCallToMakeIndex#, #nextCallToMake.name#(#renderCall(nextCallToMake.args)#)); _gt.incPc(); break;');
 								} //switch
 							} // else
 						}  // while callsToMake
 						
 						if (left(statement, 5) eq "break") {
-							arrayAppend(statements, '			case #statementCounter++#: _gt.popPc(); break;');
+							arrayAppend(statements, '				case #statementCounter++#: _gt.popPc(); break;');
 						} else if (left(statement, 6) eq "return") {
 							
-							arrayAppend(statements, '			case #statementCounter++#: _gt.popStackFrame(#renderCall(replaceNoCase(statement, "return", "", "one"))#); break;');
+							arrayAppend(statements, '				case #statementCounter++#: _gt.popStackFrame(#renderCall(replaceNoCase(statement, "return", "", "one"))#); _gt.loadLocalVariables(local); break;');
 							skipStatements = true; // no point doing remainder of block after a return
 							
 						} else if (left(trim(statement), 4) eq "var ") {
 							
 							// We have to var this variable at the front of gt_step
 							vars["var #listGetAt(statement, 2, " 	=")# = 0"] = true;
-							arrayAppend(statements, '			case #statementCounter++#: #renderCall(listRest(statement, " "))#; _gt.incPc(); break;');
+							arrayAppend(statements, '				case #statementCounter++#: #renderCall(listRest(statement, " "))#; _gt.incPc(); break;');
 							
 						} else if (not left(trim(statement), 8) eq "___call_") {		// Skip ignored return values
 						
-							arrayAppend(statements, '			case #statementCounter++#: #renderCall(statement)#; _gt.incPc(); break;');
+							arrayAppend(statements, '				case #statementCounter++#: #renderCall(statement)#; _gt.incPc(); break;');
 							
 						} // else if	
 					} // if statement neq ""
 				} // for statementIndex
 				
-				if (not skipStatements)
-					arrayAppend(statements, '			case #statementCounter++#: _gt.popPc(); break;'); // end of the block
+				if (not skipStatements) {
+					if (right(statements[arrayLen(statements)], 19) eq "_gt.incPc(); break;")
+						statements[arrayLen(statements)] = replace(statements[arrayLen(statements)], "_gt.incPc(); break;", "_gt.popPc(); break;", "ONE");	// replace existing incPc with popPc to save a step
+					else
+						arrayAppend(statements, '				case #statementCounter++#: _gt.popPc(); break;'); 												// end of the block
+				}
 				
 			} // not isSimple block
 		} // for block index
@@ -889,16 +887,20 @@ component {
 			'	',
 			'	public function _gt_getSymbol(string symbol) {return _gt.getSymbolLocation(symbol);}',
 			'	',
-			'	public boolean function _gt_step() {',
+			'	public boolean function _gt_step(numeric _gt_ms = 0) {',
 			'		' & structKeyList(vars, ";") & ";",
+			'		var _gt_start = getTickCount();',
 			'	',
-			'		structAppend(local, _gt.getFrameLocalVariables());',
+			'		_gt.loadLocalVariables(local, false);',
 			'	',
-			'		switch(_gt.getPc()) {',
+			'		while (_gt.threadHasStackFrames() and ((getTickCount() - _gt_start) le _gt_ms) or (_gt_ms eq 0)) {',
+			'			switch(_gt.getPc()) {',
 			'	',
 			arrayToList(statements, chr(13)),
-			'			default: return false;',
+			'				default: return false;',
 			'	',
+			'			}',
+			'			if (_gt_ms eq 0) _gt_ms = -1;',
 			'		}',
 			'		',
 			'		_gt.saveLocalVariables(local);',
