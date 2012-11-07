@@ -10,7 +10,7 @@
 		helper.spawn("HelloWorldLogger", "sayHello");	// Create a green thread
 	
 	helper.setPaused(false);							// Unpause (optinal)
-	sleep(30000);										// Wait
+	sleep(20000);										// Wait
 	helper.stop();										// Stop worker threads
 	
 </cfscript>

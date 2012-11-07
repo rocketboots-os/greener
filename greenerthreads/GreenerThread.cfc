@@ -1,16 +1,15 @@
 /**
  *	Run limited-script-syntax cfcs in a simulated multi-tasking kernel
  *
- *	TODO: linked loop of threads for active and map of waiting threads instead of myThreads[]
- *	TODO: calls between components
- * 	TODO: tail recursion stack cleanup
- *	TODO: else/else if
- *	TODO: try/catch/finally
- *	TODO: message receipt with switch(µ...)
- *	TODO: anonymous function support
- *	TODO: non-breaking custom tag bodies, esp. lock
- *	TODO: messaging gateway with https://github.com/nmische/cf-websocket-gateway
- *	TODO: preserve original source line in comments
+ *	TODO: 	calls between components
+ * 	TODO: 	tail recursion stack cleanup
+ *	TODO: 	else/else if
+ *	TODO: 	try/catch/finally
+ *	TODO: 	message receipt with switch(µ...)
+ *	TODO: 	anonymous function support
+ *	TODO:	non-breaking custom tag bodies, esp. lock, by calling gt_step recursively with infinite-ish timeout
+ *	TODO: 	messaging gateway with https://github.com/nmische/cf-websocket-gateway
+ *	TODO: 	preserve original source line in comments
  *
  *	(c) 2012 RocketBoots Pty Limited
  * 	$Id: GreenerThread.cfc 9575 2012-11-02 01:01:12Z robin $
@@ -77,6 +76,8 @@ component {
 		_threadsByTid = {};		// Map
 		_threadsByName = {};	// Map, by optional name parameter passed to spawn()
 		_threadsByWorker = [];	// 2D array
+		_headThread = 0;
+		_tailThread = 0;
 		_run = true;
 		_paused = false;
 		_context = this;
@@ -109,9 +110,9 @@ component {
 	 
 	public void function _worker(numeric workerIndex) {
 		var thisWorker = workerIndex;
-		var myThreads = 0;
 		var threadIndex = 0;
 		var nextThread = 0;
+		var continueThread = 0;
 		
 		writeLog("worker #workerIndex# started");
 		
@@ -119,20 +120,59 @@ component {
 		
 			while (_run) {
 				
-				// TODO: Improve locking of myThreads - relatively safe atm as we are only thread to delete from this array
-				
-				myThreads = _threadsByWorker[thisWorker];
-				
-				if (not _paused and not arrayIsEmpty(myThreads)) {
+				if (not _paused) {
 					
-					for (threadIndex = arrayLen(myThreads); threadIndex gt 0; threadIndex--) {
+					// get the next thread from the loop
+					lock name="#this.uid#_threads" type="exclusive" timeout="1" throwontimeout="false" { 
+					
+						if (isStruct(_headThread)) {
+							
+							nextThread = _headThread;
+							
+							if (isStruct(_headThread.next)) {
+								_headThread = _headThread.next;
+								
+							} else {
+								_headThread = 0;
+								_tailThread = 0;
+								
+							}
+							
+						} else {
+							nextThread = 0;
+						}
+					}
+					
+					if (isStruct(nextThread)) {
 						
-						nextThread = myThreads[threadIndex];
+						// Let the thread execute steps for 2 ms
+						try {
+							continueThread = nextThread.stack[1].instance._gt_step(2);
+						} catch(any e) {
+							continueThread = false;
+							writeLog("Thread #_tid# halted with exception #e.message#");
+						}
 						
-						if (arrayIsEmpty(nextThread.stack) or not nextThread.stack[1].instance._gt_step(2)) {	// Let the thread execute steps for 2 ms
+						if (continueThread) {
+							
+							// return thread to tail of loop
+							lock name="#this.uid#_threads" type="exclusive" timeout="1" throwontimeout="false" {
+								
+								nextThread.next = 0;
+								
+								if (isStruct(_tailThread))
+									_tailThread.next = nextThread;
+									
+								if (not isStruct(_headThread))
+									_headThread = nextThread;
+									
+								_tailThread = nextThread;
+								
+							} // lock
+							
+						} else {
 							
 							// Run out of stuff to do, kill thread
-							arrayDeleteAt(myThreads, threadIndex);
 							
 							lock name="#this.uid#_threads" type="exclusive" timeout="1" throwontimeout="false" {   
 								 
@@ -142,13 +182,14 @@ component {
 									structDelete(_threadsByName, nextThread.name);
 								}
 							}	// lock
-						} // stack empty
-					} // for each thread
+							
+						}
+					} // isStruct(nextThread)
 					
 				} else {
 					sleep(1);
 					
-				} // myThreads not empty
+				} // paused
 			} // while run 
 		
 		} catch(any e) {
@@ -208,6 +249,7 @@ component {
 		
 		newThread = {
 			tid = newTid,
+			next = 0,
 			name = threadName,
 			messageQueue = [],
 			stack = [{
@@ -222,12 +264,23 @@ component {
 		instance._gt_init(newThread, this);
 		
 		lock name="#this.uid#_threads" type="exclusive" timeout="1" throwontimeout="false" { 
+
+			_threadsByTid[newTid] = newThread;
+			
 			if (threadName neq "") {
 				_threadsByName[threadName] = newThread;
 			}
 			
-			_threadsByTid[newTid] = newThread;
-			arrayAppend(_threadsByWorker[newWorker], newThread);
+			// add to loop of executing threads
+			
+			if (isStruct(_tailThread))
+				_tailThread.next = newThread;
+				
+			if (not isStruct(_headThread))
+				_headThread = newThread;
+				
+			_tailThread = newThread;
+
 		}
 		
 		return newTid;
@@ -300,6 +353,8 @@ component {
 	package void function pushStackFrame(numeric callIndex, numeric initialPc, struct args) {
 		
 		args.arguments = structCopy(args);
+		
+		// TODO: replace existing frame if tail recursive
 		
 		arrayInsertAt(_thread.stack, 1, {
 			instance = _instance,			// TODO: support green to green method invocation
