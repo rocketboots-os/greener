@@ -2,7 +2,6 @@
  *	Run limited-script-syntax cfcs in a simulated multi-tasking kernel
  *
  *	TODO: 	calls between components
- * 	TODO: 	tail recursion stack cleanup
  *	TODO: 	else/else if
  *	TODO: 	try/catch/finally
  *	TODO: 	message receipt with switch(µ...)
@@ -342,6 +341,22 @@ component {
 	
 	
 	/**
+	 * Set a list of pcs that are the last statements in their block. Used by pushStackFrame to determine
+	 * whether or not it is safe to throw away the current stack frame
+	 */
+	 
+	package function setLastStatementsInBlock() {
+		var key = 0;
+		
+		_lastStatements = {};
+		
+		for (key in arguments)
+			_lastStatements[arguments[key]] = true;
+	}
+	
+	
+	
+	/**
 	 * Called by _gt_step() to cause a new stack frame to be created on the thread passed to setThread()
 	 *
 	 * @param	callIndex	The call to save any returned values against
@@ -351,18 +366,38 @@ component {
 	 */
 	 
 	package void function pushStackFrame(numeric callIndex, numeric initialPc, struct args) {
+		var pcIndex = 0;
+		var allLastStatements = true;
 		
 		args.arguments = structCopy(args);
 		
-		// TODO: replace existing frame if tail recursive
+		// Check if we can replace existing frame for tail recursion optimisation
+		for (pcIndex = arrayLen(_thread.stack[1].pc); pcIndex gt 0; pcIndex--) {
+			if (not StructKeyExists(_lastStatements, _thread.stack[1].pc[pcIndex])) {
+				allLastStatements = false;
+				break;
+			}
+		}
+
+		if (allLastStatements) {
+			
+			// yes, update current frame
+			_thread.stack[1].localVars = args;
+			_thread.stack[1].returnValues = [];
+			_thread.stack[1].returnCallIndex = callIndex;
+			_thread.stack[1].pc = [initialPc];
 		
-		arrayInsertAt(_thread.stack, 1, {
-			instance = _instance,			// TODO: support green to green method invocation
-			localVars = args,
-			returnValues = [],
-			returnCallIndex = callIndex,
-			pc = [initialPc]
-		});
+		} else {
+			
+			// no, create a new frame
+			arrayInsertAt(_thread.stack, 1, {
+				instance = _instance,			// TODO: support green to green method invocation
+				localVars = args,
+				returnValues = [],
+				returnCallIndex = callIndex,
+				pc = [initialPc]
+			});
+		}
 	}
 	
 
@@ -770,6 +805,7 @@ component {
 		var blockOffsets = [];
 		var statements = [];
 		var symbols = [];
+		var lastStatementCounterInBlock = [];
 		var vars = {};
 		var callIndex = 0;
 		var call = 0;
@@ -883,7 +919,10 @@ component {
 						}  // while callsToMake
 						
 						if (left(statement, 5) eq "break") {
-							arrayAppend(statements, '				case #statementCounter++#: _gt.popPc(); break;');
+							if (right(statements[arrayLen(statements)], 19) eq "_gt.incPc(); break;")
+								statements[arrayLen(statements)] = replace(statements[arrayLen(statements)], "_gt.incPc(); break;", "_gt.popPc(); break;", "ONE");	// replace existing incPc with popPc to save a step
+							else
+								arrayAppend(statements, '				case #statementCounter++#: _gt.popPc(); break;');
 						} else if (left(statement, 6) eq "return") {
 							
 							arrayAppend(statements, '				case #statementCounter++#: _gt.popStackFrame(#renderCall(replaceNoCase(statement, "return", "", "one"))#); _gt.loadLocalVariables(local); break;');
@@ -904,11 +943,18 @@ component {
 				} // for statementIndex
 				
 				if (not skipStatements) {
-					if (right(statements[arrayLen(statements)], 19) eq "_gt.incPc(); break;")
+					
+					if (right(statements[arrayLen(statements)], 19) eq "_gt.incPc(); break;") {
 						statements[arrayLen(statements)] = replace(statements[arrayLen(statements)], "_gt.incPc(); break;", "_gt.popPc(); break;", "ONE");	// replace existing incPc with popPc to save a step
-					else
+					} else {
 						arrayAppend(statements, '				case #statementCounter++#: _gt.popPc(); break;'); 												// end of the block
+					
+						// Record last statement counter in block - if this is all we have left to do in block
+						// then the stack frame is fair game to be discarded in tail-recursion optimisation
+						arrayAppend(lastStatementCounterInBlock, statementCounter - 1);
+					}
 				}
+				
 				
 			} // not isSimple block
 		} // for block index
@@ -933,6 +979,7 @@ component {
 			'		_gt.setSymbolLocations(',
 			arrayToList(symbols, ",#chr(13)#"),
 			'		);',
+			'		_gt.setLastStatementsInBlock(' & arrayToList(lastStatementCounterInBlock) & ');',
 			'	',
 			'		if (not isNumeric(thread.stack[1].pc[1])) thread.stack[1].pc[1] = _gt.getSymbolLocation(thread.stack[1].pc[1]);',
 			'		_gt.setContext(thread, context);',
